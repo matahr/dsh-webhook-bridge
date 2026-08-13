@@ -1,0 +1,9 @@
+- insert:
+    - id: dsh-webhook-bridge
+      name: dsh-webhook-bridge
+      config:
+        host: 127.0.0.1
+        port: 8788
+        secret: !!js process.env.DSH_WEBHOOK_SECRET ?? ''
+        provider: deepseek-official
+        model: deepseek-v4-flash
