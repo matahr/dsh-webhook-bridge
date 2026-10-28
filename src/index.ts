@@ -53,6 +53,12 @@ export interface WebhookBridgeConfig {
    * bridge keeps the original behaviour: one private agent per channel.
    */
   member?: string
+  /**
+   * Text prepended when the Member is not live and the message falls back to a
+   * relay agent. The agent is told to deliver the alert through the Team, which
+   * is the only path that wakes a Member that has no session yet.
+   */
+  relayPrompt?: string
 }
 
 export const Config: Schema<WebhookBridgeConfig> = Schema.object({
@@ -64,6 +70,7 @@ export const Config: Schema<WebhookBridgeConfig> = Schema.object({
   cwd: Schema.string(),
   maxBodyBytes: Schema.number().default(1_048_576),
   member: Schema.string(),
+  relayPrompt: Schema.string(),
 })
 
 /** The structure this bridge needs from the agent-team service, nothing more. */
@@ -344,9 +351,24 @@ export function apply(ctx: Context, config: WebhookBridgeConfig): void {
       if (config.member !== undefined) {
         const team = (ctx as unknown as { agentTeams?: MemberLookup }).agentTeams
         const agent = pickMemberAgent(agents.list(), config.member, team)
-        if (agent === undefined) throw new MemberNotLiveError(memberHandle(config.member))
-        agent.followup(userMessage)
-        logger.info(`dsh-webhook-bridge: message from channel ${channel} delivered to member ${config.member}`)
+        if (agent !== undefined) {
+          agent.followup(userMessage)
+          logger.info(`dsh-webhook-bridge: message from channel ${channel} delivered to member ${config.member}`)
+          return
+        }
+        // The Member has no live session. Relaying through the Team is the only
+        // path that wakes it: a Team message mentions the handle and the Team
+        // runtime brings the session up. Without a relay prompt there is nothing
+        // safe to do, so the caller is told instead of being lied to.
+        if (config.relayPrompt === undefined) throw new MemberNotLiveError(memberHandle(config.member))
+        const relay = createUserMessage({
+          content: [{ type: 'text', text: `${config.relayPrompt}\n\n${text}` }],
+          source: { kind: 'user' },
+        })
+        const relayRecord = await ensureSession(channel)
+        if (replyUrl !== undefined) relayRecord.replyUrl = replyUrl
+        relayRecord.agent.followup(relay)
+        logger.info(`dsh-webhook-bridge: member ${config.member} not live; relayed through channel ${channel}`)
         return
       }
       const record = await ensureSession(channel)

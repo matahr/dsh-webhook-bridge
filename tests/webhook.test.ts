@@ -210,3 +210,29 @@ describe('member routing', () => {
     }
   })
 })
+
+describe('relay fallback', () => {
+  it('keeps the 503 when no relay prompt is configured', async () => {
+    const deps: BridgeDeps = {
+      handleMessage: async () => {
+        throw new MemberNotLiveError('trader-senior')
+      },
+      logger: { warn: () => undefined },
+    }
+    const bridge = createBridge({ host: '127.0.0.1', port: 0, secret: 'test-secret', maxBodyBytes: 1024 }, deps)
+    await new Promise<void>((resolve) => bridge.server.listen(0, '127.0.0.1', resolve))
+    const address = bridge.server.address() as AddressInfo
+    const base = `http://127.0.0.1:${address.port}`
+    try {
+      const res = await post(base, '/hook/binance', { message: 'x' }, 'test-secret')
+      expect(res.status).toBe(503)
+    } finally {
+      await bridge.close()
+    }
+  })
+
+  it('accepts the relay prompt in the config', () => {
+    const config = { host: '127.0.0.1', port: 0, secret: 's', maxBodyBytes: 8, member: 'trader-senior', relayPrompt: 'relay this' }
+    expect(config.relayPrompt).toBe('relay this')
+  })
+})
