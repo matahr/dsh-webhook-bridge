@@ -1,6 +1,6 @@
 {
   "name": "dsh-webhook-bridge",
-  "version": "0.1.1",
+  "version": "0.1.0",
   "description": "Generic webhook receiver for DeepSeek Harness \u2014 POST to a local endpoint to wake a dsh agent.",
   "type": "module",
   "main": "lib/index.js",
