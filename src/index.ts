@@ -29,7 +29,12 @@ export const name = 'dsh-webhook-bridge'
 export const inject = ['agents', 'sessions']
 
 /** Service name the agent-team plugin provides; read only when present. */
-const TEAM_SERVICE = 'agentTeams'
+/**
+ * Service name of the Team runtime. The published fork mounted by this profile
+ * (`@contexera/dsh-agent-team` 0.2.5) registers it singular; the bundled
+ * `@deepseek-ai/dsh-experimental-agent-team` used `agentTeams`.
+ */
+const TEAM_SERVICE = 'agentTeam'
 
 /** Plugin config: endpoint bind, auth secret, and default agent options. */
 export interface WebhookBridgeConfig {
@@ -76,10 +81,28 @@ export const Config: Schema<WebhookBridgeConfig> = Schema.object({
   relayPrompt: Schema.string(),
 })
 
+/** One Member as the Team roster reports it. */
+export interface RosterMember {
+  memberId?: string
+  handle: string
+  sessionId?: string
+  workspaceId?: string
+}
+
+/** One roster row: the Member plus whether its generation is live. */
+export interface RosterEntry {
+  member: RosterMember
+  presence?: string
+}
+
 /** The structure this bridge needs from the agent-team service, nothing more. */
 export interface MemberLookup {
-  /** Return the membership of a live agent, or undefined when it is not a member. */
-  tryMembership: (agent: Agent) => { name: string } | undefined
+  /** Return the live Member bound to an agent, or undefined when it is not one. */
+  memberForAgent?: (agent: Agent) => { handle: string } | undefined
+  /** The roster, which still names a Member that has no live generation. */
+  members?: () => ReadonlyArray<RosterEntry>
+  /** Bring a Member's generation up; the only wake path that exists. */
+  recoverMember?: (request: { memberId: string; workspaceId: string }) => Promise<unknown>
 }
 
 /** Raised when `member` is configured and no live agent carries that handle. */
@@ -111,9 +134,45 @@ export function pickMemberAgent(
 ): Agent | undefined {
   if (team === undefined) return undefined
   const wanted = memberHandle(handle)
-  for (const agent of agents) {
-    const membership = team.tryMembership(agent)
-    if (membership !== undefined && memberHandle(membership.name) === wanted) return agent
+  // Identity by reference: the Team runtime recognises the exact agent object it
+  // created, so a solved handle can never be faked by a session named alike.
+  if (team.memberForAgent !== undefined) {
+    for (const agent of agents) {
+      const member = team.memberForAgent(agent)
+      if (member !== undefined && memberHandle(member.handle) === wanted) return agent
+    }
+  }
+  // A Member that is live but not yet reachable by reference is still named by
+  // the roster, which carries the session the agent was created from.
+  for (const entry of team.members?.() ?? []) {
+    if (memberHandle(entry.member.handle) !== wanted) continue
+    const sessionId = entry.member.sessionId
+    if (sessionId === undefined) return undefined
+    return agents.find((agent) => agent.id === sessionId)
+  }
+  return undefined
+}
+
+/**
+ * Ask the Team runtime to bring a Member's generation up, then look again.
+ *
+ * Nothing here can create a Member: the runtime owns that, and a bridge-built
+ * look-alike would answer without the Member's context. So the bridge either
+ * finds the real one or reports that it could not.
+ */
+export async function wakeMemberAgent(
+  team: MemberLookup | undefined,
+  handle: string,
+  resolve: () => Agent | undefined,
+): Promise<Agent | undefined> {
+  if (team?.members === undefined || team.recoverMember === undefined) return undefined
+  const wanted = memberHandle(handle)
+  for (const entry of team.members()) {
+    if (memberHandle(entry.member.handle) !== wanted) continue
+    const { memberId, workspaceId } = entry.member
+    if (memberId === undefined || workspaceId === undefined) return undefined
+    await team.recoverMember({ memberId, workspaceId })
+    return resolve()
   }
   return undefined
 }
@@ -352,18 +411,32 @@ export function apply(ctx: Context, config: WebhookBridgeConfig): void {
         source: { kind: 'user' },
       })
       if (config.member !== undefined) {
+        const member = config.member
         const team = ctx.get(TEAM_SERVICE) as MemberLookup | undefined
-        const agent = pickMemberAgent(agents.list(), config.member, team)
+        if (team === undefined) {
+          logger.warn(`dsh-webhook-bridge: team service '${TEAM_SERVICE}' is not visible from this plugin context`)
+        }
+        const resolve = () => pickMemberAgent(agents.list(), member, team)
+        let agent = resolve()
+        let woken = false
+        if (agent === undefined) {
+          try {
+            agent = await wakeMemberAgent(team, member, resolve)
+            woken = agent !== undefined
+          } catch (error) {
+            logger.warn(`dsh-webhook-bridge: could not wake member ${member}: ${String(error)}`)
+          }
+        }
         if (agent !== undefined) {
           agent.followup(userMessage)
-          logger.info(`dsh-webhook-bridge: message from channel ${channel} delivered to member ${config.member}`)
+          logger.info(`dsh-webhook-bridge: message from channel ${channel} delivered to ${woken ? 'woken ' : ''}member ${member}`)
           return
         }
         // The Member has no live session. Relaying through the Team is the only
         // path that wakes it: a Team message mentions the handle and the Team
         // runtime brings the session up. Without a relay prompt there is nothing
         // safe to do, so the caller is told instead of being lied to.
-        if (config.relayPrompt === undefined) throw new MemberNotLiveError(memberHandle(config.member))
+        if (config.relayPrompt === undefined) throw new MemberNotLiveError(memberHandle(member))
         const relay = createUserMessage({
           content: [{ type: 'text', text: `${config.relayPrompt}\n\n${text}` }],
           source: { kind: 'user' },
@@ -371,7 +444,7 @@ export function apply(ctx: Context, config: WebhookBridgeConfig): void {
         const relayRecord = await ensureSession(channel)
         if (replyUrl !== undefined) relayRecord.replyUrl = replyUrl
         relayRecord.agent.followup(relay)
-        logger.info(`dsh-webhook-bridge: member ${config.member} not live; relayed through channel ${channel}`)
+        logger.info(`dsh-webhook-bridge: member ${member} not live; relayed through channel ${channel}`)
         return
       }
       const record = await ensureSession(channel)

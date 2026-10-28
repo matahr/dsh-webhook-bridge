@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
-import { createBridge, extractReplyUrl, extractText, memberHandle, pickMemberAgent, secretsMatch, MemberNotLiveError, inject, type Bridge, type BridgeDeps } from '../src/index.js'
+import { createBridge, extractReplyUrl, extractText, memberHandle, pickMemberAgent, wakeMemberAgent, secretsMatch, MemberNotLiveError, inject, type Bridge, type BridgeDeps } from '../src/index.js'
 
 interface Started {
   bridge: Bridge
@@ -165,13 +165,16 @@ describe('pickMemberAgent', () => {
   const asAgent = (id: string): { id: string } => ({ id }) as unknown as Parameters<typeof pickMemberAgent>[0][number]
   const alice = asAgent('alice')
   const bob = asAgent('bob')
+  const carol = asAgent('carol')
   const stranger = asAgent('stranger')
   const team = {
-    tryMembership: (agent: unknown) => {
-      if (agent === alice) return { name: '@alice' }
-      if (agent === bob) return { name: '@bob' }
+    memberForAgent: (agent: unknown) => {
+      if (agent === alice) return { handle: '@alice' }
+      if (agent === bob) return { handle: '@bob' }
+      if (agent === carol) return { handle: 'carol' }
       return undefined
     },
+    members: () => [{ member: { memberId: 'm-carol', handle: 'carol', sessionId: 'carol' } }],
   }
 
   it('returns the member agent whose handle matches, ignoring the @', () => {
@@ -183,8 +186,48 @@ describe('pickMemberAgent', () => {
     expect(pickMemberAgent([stranger], 'alice', team)).toBeUndefined()
   })
 
-  it('returns undefined when the team service is absent instead of guessing', () => {
+  it('finds a roster Member whose live agent is only known by session id', () => {
+    expect(pickMemberAgent([stranger, carol], 'carol', { members: team.members })).toBe(carol)
+  })
+
+  it('reports nothing when the roster names the Member but its session is not live', () => {
+    const rosterOnly = { members: () => [{ member: { memberId: 'm-dan', handle: 'dan', sessionId: 'dan' } }] }
+    expect(pickMemberAgent([stranger], 'dan', rosterOnly)).toBeUndefined()
+  })
+
+  it('reports nothing when no team service is visible', () => {
     expect(pickMemberAgent([alice], 'alice', undefined)).toBeUndefined()
+  })
+})
+
+describe('wakeMemberAgent', () => {
+  const asAgent = (id: string): { id: string } => ({ id }) as unknown as Parameters<typeof pickMemberAgent>[0][number]
+  const woke = asAgent('trader-senior')
+
+  it('recovers the Member generation and resolves it again', async () => {
+    const recovered: unknown[] = []
+    let live = false
+    const team = {
+      members: () => [{ member: { memberId: 'm-1', handle: 'trader-senior', sessionId: 'trader-senior', workspaceId: 'w-1' } }],
+      recoverMember: async (request: unknown) => { recovered.push(request); live = true },
+    }
+    const agent = await wakeMemberAgent(team, '@Trader-Senior', () => (live ? woke : undefined))
+    expect(agent).toBe(woke)
+    expect(recovered).toEqual([{ memberId: 'm-1', workspaceId: 'w-1' }])
+  })
+
+  it('leaves the Member alone when it is not on the roster', async () => {
+    let calls = 0
+    const team = {
+      members: () => [],
+      recoverMember: async () => { calls += 1 },
+    }
+    expect(await wakeMemberAgent(team, 'alice', () => woke)).toBeUndefined()
+    expect(calls).toBe(0)
+  })
+
+  it('does nothing without a team service', async () => {
+    expect(await wakeMemberAgent(undefined, 'alice', () => woke)).toBeUndefined()
   })
 })
 
