@@ -17,9 +17,25 @@ dsh-webhook-bridge exposes a small local HTTP server. Each request to `POST /hoo
 
 - Serves `POST /hook/:channel` (Bearer-secret auth) and `GET /health`.
 - Maps one channel to one agent session; the first message creates the agent, later messages `followup()` into the same session.
+- **Optional Member routing** (`member`): instead of creating a private agent per channel, deliver the message into a live Team Member's session, so the wake-up lands where the conversation already lives. If no live agent carries that handle the endpoint answers **503 `member_not_live`** rather than quietly creating a shadow agent.
 - Extracts message text with a documented precedence: JSON `message` > `text` > `content`; non-JSON bodies are used verbatim.
 - Optional `reply_url` in the body: committed assistant text is POSTed back as `{"text": "..."}`.
 - Rejects unauthorized, malformed, and oversized requests (401/400/413).
+
+### Member routing (fork addition)
+
+Set `member` to a Team Member handle and every channel delivers into that Member instead of a per-channel agent:
+
+```yaml
+- id: dsh-webhook-bridge
+  config:
+    host: 127.0.0.1
+    port: 8788
+    secret: !!js process.env.DSH_WEBHOOK_SECRET
+    member: trader-senior
+```
+
+The handle ignores the `@` and the case. The roster is the only authority: an agent this bridge created, or a session that merely looks like a member, is not routed to. Without `member` the original per-channel behaviour is unchanged.
 
 **What it does not do (yet)**
 

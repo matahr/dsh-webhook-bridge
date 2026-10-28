@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
-import { createBridge, extractReplyUrl, extractText, secretsMatch, type Bridge, type BridgeDeps } from '../src/index.js'
+import { createBridge, extractReplyUrl, extractText, memberHandle, pickMemberAgent, secretsMatch, MemberNotLiveError, type Bridge, type BridgeDeps } from '../src/index.js'
 
 interface Started {
   bridge: Bridge
@@ -150,5 +150,63 @@ describe('secretsMatch', () => {
     expect(secretsMatch('abc', 'abc')).toBe(true)
     expect(secretsMatch('abc', 'abd')).toBe(false)
     expect(secretsMatch('abc', 'abcd')).toBe(false)
+  })
+})
+
+describe('memberHandle', () => {
+  it('normalises a handle so the @ and the case do not matter', () => {
+    expect(memberHandle('@Trader-Senior')).toBe('trader-senior')
+    expect(memberHandle('trader-senior')).toBe('trader-senior')
+    expect(memberHandle('  @TRADER-SENIOR ')).toBe('trader-senior')
+  })
+})
+
+describe('pickMemberAgent', () => {
+  const asAgent = (id: string): { id: string } => ({ id }) as unknown as Parameters<typeof pickMemberAgent>[0][number]
+  const alice = asAgent('alice')
+  const bob = asAgent('bob')
+  const stranger = asAgent('stranger')
+  const team = {
+    tryMembership: (agent: unknown) => {
+      if (agent === alice) return { name: '@alice' }
+      if (agent === bob) return { name: '@bob' }
+      return undefined
+    },
+  }
+
+  it('returns the member agent whose handle matches, ignoring the @', () => {
+    expect(pickMemberAgent([stranger, bob, alice], 'alice', team)).toBe(alice)
+    expect(pickMemberAgent([stranger, bob, alice], '@BOB', team)).toBe(bob)
+  })
+
+  it('never returns an agent the roster does not call a member', () => {
+    expect(pickMemberAgent([stranger], 'alice', team)).toBeUndefined()
+  })
+
+  it('returns undefined when the team service is absent instead of guessing', () => {
+    expect(pickMemberAgent([alice], 'alice', undefined)).toBeUndefined()
+  })
+})
+
+describe('member routing', () => {
+  it('answers 503 member_not_live instead of creating a shadow agent', async () => {
+    const deps: BridgeDeps = {
+      handleMessage: async () => {
+        throw new MemberNotLiveError('trader-senior')
+      },
+      logger: { warn: () => undefined },
+    }
+    const bridge = createBridge({ host: '127.0.0.1', port: 0, secret: 'test-secret', maxBodyBytes: 1024 }, deps)
+    await new Promise<void>((resolve) => bridge.server.listen(0, '127.0.0.1', resolve))
+    const address = bridge.server.address() as AddressInfo
+    const base = `http://127.0.0.1:${address.port}`
+    try {
+      const res = await post(base, '/hook/binance', { message: '[ALERTA] BTCUSDT' }, 'test-secret')
+      expect(res.status).toBe(503)
+      expect(res.json.error).toBe('member_not_live')
+      expect(res.json.member).toBe('trader-senior')
+    } finally {
+      await bridge.close()
+    }
   })
 })

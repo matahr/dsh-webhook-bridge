@@ -23,7 +23,10 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 
 export const name = 'dsh-webhook-bridge'
-export const inject = ['agents', 'sessions']
+export const inject = {
+  required: ['agents', 'sessions'],
+  optional: ['agentTeams'],
+}
 
 /** Plugin config: endpoint bind, auth secret, and default agent options. */
 export interface WebhookBridgeConfig {
@@ -41,6 +44,15 @@ export interface WebhookBridgeConfig {
   cwd?: string
   /** Maximum request body size in bytes. */
   maxBodyBytes: number
+  /**
+   * Team Member handle that receives every channel's message.
+   *
+   * When set, the bridge stops creating its own agent per channel and steers
+   * the message into that Member's live session instead, so the alert wakes a
+   * Member that already holds the conversation's context. When unset the
+   * bridge keeps the original behaviour: one private agent per channel.
+   */
+  member?: string
 }
 
 export const Config: Schema<WebhookBridgeConfig> = Schema.object({
@@ -51,7 +63,50 @@ export const Config: Schema<WebhookBridgeConfig> = Schema.object({
   model: Schema.string(),
   cwd: Schema.string(),
   maxBodyBytes: Schema.number().default(1_048_576),
+  member: Schema.string(),
 })
+
+/** The structure this bridge needs from the agent-team service, nothing more. */
+export interface MemberLookup {
+  /** Return the membership of a live agent, or undefined when it is not a member. */
+  tryMembership: (agent: Agent) => { name: string } | undefined
+}
+
+/** Raised when `member` is configured and no live agent carries that handle. */
+export class MemberNotLiveError extends Error {
+  constructor(readonly handle: string) {
+    super(`team member "${handle}" is not live in this harness`)
+    this.name = 'MemberNotLiveError'
+  }
+}
+
+/** Normalise a Member handle so `@Trader-Senior` and `trader-senior` match. */
+export function memberHandle(raw: string): string {
+  const trimmed = raw.trim().toLowerCase()
+  return trimmed.startsWith('@') ? trimmed.slice(1) : trimmed
+}
+
+/**
+ * Find the live agent that belongs to a Team Member.
+ *
+ * The roster is the only authority on who is a member: an agent created by this
+ * bridge is not one, and a session whose name happens to match is not one
+ * either. Returning undefined lets the caller answer 503 instead of silently
+ * creating a shadow agent that would answer without the Member's context.
+ */
+export function pickMemberAgent(
+  agents: readonly Agent[],
+  handle: string,
+  team: MemberLookup | undefined,
+): Agent | undefined {
+  if (team === undefined) return undefined
+  const wanted = memberHandle(handle)
+  for (const agent of agents) {
+    const membership = team.tryMembership(agent)
+    if (membership !== undefined && memberHandle(membership.name) === wanted) return agent
+  }
+  return undefined
+}
 
 /** Channel names are constrained to URL-safe short identifiers. */
 const CHANNEL_RE = /^[a-zA-Z0-9_-]{1,64}$/
@@ -193,6 +248,10 @@ export function createBridge(config: WebhookBridgeConfig, deps: BridgeDeps): Bri
         send(200, { ok: true, channel })
       } catch (error: unknown) {
         deps.logger.warn(`dsh-webhook-bridge: ${String(error)}`)
+        if (error instanceof MemberNotLiveError) {
+          send(503, { ok: false, error: 'member_not_live', member: error.handle })
+          return
+        }
         send(500, { ok: false, error: 'agent_failed' })
       }
     })().catch((error: unknown) => {
@@ -278,12 +337,20 @@ export function apply(ctx: Context, config: WebhookBridgeConfig): void {
 
   const bridge = createBridge(config, {
     handleMessage: async (channel, text, replyUrl) => {
-      const record = await ensureSession(channel)
-      if (replyUrl !== undefined) record.replyUrl = replyUrl
       const userMessage = createUserMessage({
         content: [{ type: 'text', text }],
         source: { kind: 'user' },
       })
+      if (config.member !== undefined) {
+        const team = (ctx as unknown as { agentTeams?: MemberLookup }).agentTeams
+        const agent = pickMemberAgent(agents.list(), config.member, team)
+        if (agent === undefined) throw new MemberNotLiveError(memberHandle(config.member))
+        agent.followup(userMessage)
+        logger.info(`dsh-webhook-bridge: message from channel ${channel} delivered to member ${config.member}`)
+        return
+      }
+      const record = await ensureSession(channel)
+      if (replyUrl !== undefined) record.replyUrl = replyUrl
       record.agent.followup(userMessage)
     },
     logger,
