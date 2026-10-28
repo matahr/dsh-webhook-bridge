@@ -23,10 +23,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 
 export const name = 'dsh-webhook-bridge'
-export const inject = {
-  required: ['agents', 'sessions'],
-  optional: ['agentTeams'],
-}
+// Cordis reads an object `inject` as service-name → intercept config, so the
+// optional team service is read through `ctx.get()` instead of being declared:
+// declaring a service that may never be provided parks the plugin in `pending`.
+export const inject = ['agents', 'sessions']
+
+/** Service name the agent-team plugin provides; read only when present. */
+const TEAM_SERVICE = 'agentTeams'
 
 /** Plugin config: endpoint bind, auth secret, and default agent options. */
 export interface WebhookBridgeConfig {
@@ -349,7 +352,7 @@ export function apply(ctx: Context, config: WebhookBridgeConfig): void {
         source: { kind: 'user' },
       })
       if (config.member !== undefined) {
-        const team = (ctx as unknown as { agentTeams?: MemberLookup }).agentTeams
+        const team = ctx.get(TEAM_SERVICE) as MemberLookup | undefined
         const agent = pickMemberAgent(agents.list(), config.member, team)
         if (agent !== undefined) {
           agent.followup(userMessage)

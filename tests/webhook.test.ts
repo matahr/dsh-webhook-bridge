@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { AddressInfo } from 'node:net'
-import { createBridge, extractReplyUrl, extractText, memberHandle, pickMemberAgent, secretsMatch, MemberNotLiveError, type Bridge, type BridgeDeps } from '../src/index.js'
+import { createBridge, extractReplyUrl, extractText, memberHandle, pickMemberAgent, secretsMatch, MemberNotLiveError, inject, type Bridge, type BridgeDeps } from '../src/index.js'
 
 interface Started {
   bridge: Bridge
@@ -234,5 +234,15 @@ describe('relay fallback', () => {
   it('accepts the relay prompt in the config', () => {
     const config = { host: '127.0.0.1', port: 0, secret: 's', maxBodyBytes: 8, member: 'trader-senior', relayPrompt: 'relay this' }
     expect(config.relayPrompt).toBe('relay this')
+  })
+})
+
+describe('inject declaration', () => {
+  it('stays an array of service names', () => {
+    // Cordis treats an object `inject` as service-name -> intercept config, so
+    // `{ required, optional }` parks the plugin waiting for two services that
+    // never exist. The optional team service is read with ctx.get() instead.
+    expect(Array.isArray(inject)).toBe(true)
+    expect(inject).toEqual(['agents', 'sessions'])
   })
 })
